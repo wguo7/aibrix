@@ -717,3 +717,45 @@ func TestVTCBasic_PostRouteUpdateChargesUser(t *testing.T) {
 	assert.NoError(t, err)
 	assert.Zero(t, tokens, "a request without a user charges nobody")
 }
+
+// TestVTCBasicChargesOnlyAdmittedRequests checks that Route admits its pick before
+// charging the user: with a requestsInflight cap, a pod at its cap rejects the
+// request with 429, and the user must not keep the charge for it.
+func TestVTCBasicChargesOnlyAdmittedRequests(t *testing.T) {
+	newRouter := func() (*BasicVTCRouter, TokenTracker) {
+		config := &VTCConfig{InputTokenWeight: 1.0, OutputTokenWeight: 1.0, Variant: RouterVTCBasic}
+		tracker := NewInMemorySlidingWindowTokenTracker(config)
+		return &BasicVTCRouter{
+			cache:          NewSimpleCache(),
+			tokenTracker:   tracker,
+			tokenEstimator: NewSimpleTokenEstimator(),
+			config:         config,
+		}, tracker
+	}
+	pods := NewSimplePodList(createTestPodsForMetrics(2))
+	ctx := context.Background()
+
+	router, tracker := newRouter()
+	for i := 0; i < 5; i++ {
+		rc := types.NewRoutingContext(ctx, RouterVTCBasic, "model1", "a request the full pod rejects", "req", "user1")
+		rc.SetTargetAdmitter(func(*v1.Pod) error { return types.ErrTargetReplicaInflightExceeded })
+		_, err := router.Route(rc, pods)
+		rc.Delete()
+		assert.ErrorIs(t, err, types.ErrTargetReplicaInflightExceeded)
+	}
+	tokens, err := tracker.GetTokenCount(ctx, "user1")
+	assert.NoError(t, err)
+	assert.Zero(t, tokens, "rejected requests must not be charged")
+
+	router, tracker = newRouter()
+	rc := types.NewRoutingContext(ctx, RouterVTCBasic, "model1", "a request a pod admits", "req", "user1")
+	admitted := 0
+	rc.SetTargetAdmitter(func(*v1.Pod) error { admitted++; return nil })
+	_, err = router.Route(rc, pods)
+	rc.Delete()
+	assert.NoError(t, err)
+	assert.Equal(t, 1, admitted)
+	tokens, err = tracker.GetTokenCount(ctx, "user1")
+	assert.NoError(t, err)
+	assert.Positive(t, tokens, "an admitted request is charged")
+}

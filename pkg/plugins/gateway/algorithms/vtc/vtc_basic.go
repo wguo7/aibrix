@@ -269,6 +269,10 @@ func (r *BasicVTCRouter) Route(ctx *types.RoutingContext, readyPodList types.Pod
 		}
 	}
 
+	// Charge the user only for a request a pod admitted, so a 429 costs nothing.
+	if err := ctx.AdmitTarget(targetPod); err != nil {
+		return "", err
+	}
 	chargeUserTokens(ctx, tracker, *user, inputTokens, outputTokens)
 
 	ctx.SetTargetPod(targetPod)
